@@ -30,6 +30,10 @@ const PROVIDER_CONFIG = {
     'openai': {
         displayName: 'OpenAI',
         models: {
+            'gpt-5.2': {
+                displayName: 'GPT-5.2',
+                tempRange: { min: 0.1, max: 1.0 }
+            },
             'gpt-4': {
                 displayName: 'GPT-4',
                 tempRange: { min: 0.1, max: 1.0 }
@@ -134,3 +138,5 @@ if (typeof window !== 'undefined') {
     window.PROVIDER_CONFIG = PROVIDER_CONFIG;
     console.log("✅ Assigned to window.PROVIDER_CONFIG");
 }
+
+// execution: python3 -m http.server 8000
