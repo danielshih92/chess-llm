@@ -16,6 +16,20 @@
                <button id="copyPgn">Copy PGN</button>
            </div>
 
+           <div class="settings-section">
+               <h3>Move Strategy</h3>
+               <div class="input-group toggle-group" id="strategyToggle">
+                   <label class="toggle-option">
+                       <input type="radio" name="moveStrategy" value="strict-list" checked>
+                       <span>Strict List + JSON</span>
+                   </label>
+                   <label class="toggle-option">
+                       <input type="radio" name="moveStrategy" value="rethink">
+                       <span>Rethink + Auto-fix</span>
+                   </label>
+               </div>
+           </div>
+
            <!-- White Player Settings -->
            <div class="settings-section">
                <h3>White Player</h3>
@@ -82,6 +96,7 @@
                </div>
            </div>
 
+           <!--
            <div class="auto-play-controls">
                <div class="input-group">
                    <label>
@@ -105,6 +120,7 @@
                    </label>
                </div>
            </div>
+           -->
        </div>
 
        <div class="board-container">

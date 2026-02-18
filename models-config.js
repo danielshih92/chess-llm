@@ -6,6 +6,7 @@
  */
 
 const PROVIDER_CONFIG = {
+    /**
     'groq': {
         displayName: 'Groq',
         models: {
@@ -27,6 +28,7 @@ const PROVIDER_CONFIG = {
             }
         }
     },
+     */
     'openai': {
         displayName: 'OpenAI',
         models: {
@@ -55,20 +57,31 @@ const PROVIDER_CONFIG = {
     'gemini': {
         displayName: 'Google Gemini',
         models: {
-            'gemini-2.0-flash-exp': {
-                displayName: 'Gemini Flash',
+            'gemini-3-pro-preview': {
+                displayName: 'Gemini 3 Pro Preview',
                 tempRange: { min: 0.1, max: 1.0 }
             },
-            'gemini-2.0-pro-exp': {
-                displayName: 'Gemini Pro',
+            'gemini-3-flash-preview': {
+                displayName: 'Gemini 3 Flash Preview',
                 tempRange: { min: 0.1, max: 1.0 }
             },
-            'gemini-2.0-ultra-exp': {
-                displayName: 'Gemini Ultra',
+            //gemini-2.5-pro
+            'gemini-2.5-pro': {
+                displayName: 'gemini-2.5-pro',
+                tempRange: { min: 0.1, max: 1.0 }
+            },
+            //gemini-2.5-flash
+            'gemini-2.5-flash': {
+                displayName: 'gemini-2.5-flash',
+                tempRange: { min: 0.1, max: 1.0 }
+            },
+            'gemini-2.5-flash-lite': {
+                displayName: 'gemini-2.5-flash-lite',
                 tempRange: { min: 0.1, max: 1.0 }
             }
         }
     },
+    /**
     'grok': {
         displayName: 'xAI Grok',
         models: {
@@ -117,8 +130,9 @@ const PROVIDER_CONFIG = {
                 displayName: 'Gemini 1.5 Flash',
                 tempRange: { min: 0.1, max: 1.0 }
             }
-        }
+        }      
     }
+    */
 };
 
 // Export the configuration

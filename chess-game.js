@@ -39,6 +39,29 @@ Respond with a JSON object containing your move and reasoning:
    "reasoning": "<your analysis and explanation>"
 }`;
 
+const SYSTEM_PROMPT_RETHINK = `You are playing a game of chess. Analyze the position and choose a legal move.
+
+CRITICAL REQUIREMENTS:
+1. You MUST use Standard Algebraic Notation (SAN)
+2. Your move MUST be legal for the given position
+3. DO NOT output coordinates format (e2e4)
+
+JSON:
+- ONLY WRITE JSON.
+- DO NOT WRITE ANYTHING BEFORE THE JSON OR AFTER THE JSON.
+- YOU ONLY OUTPUT VALID JSON CODE.
+
+RESPONSE FORMAT:
+{
+    "move": "<your chosen move in SAN>",
+    "reasoning": "<your analysis and explanation>"
+}`;
+
+const MOVE_STRATEGIES = {
+    STRICT_LIST: 'strict-list',
+    RETHINK: 'rethink'
+};
+
 class ChessModelProvider {
    async makeMove({ fen, history, legalMoves }) {
        throw new Error('Method must be implemented');
@@ -49,6 +72,96 @@ class ChessModelProvider {
            throw new Error(`Invalid move: ${moveData?.move}. Must be one of: ${legalMoves.join(', ')}`);
        }
        return moveData;
+   }
+
+   parseMoveData(responseText) {
+       if (!responseText) {
+           throw new Error('Empty model response');
+       }
+       const cleaned = responseText.replace(/```json\s*|\s*```/g, '').trim();
+       try {
+           return JSON.parse(cleaned);
+       } catch (error) {
+           throw new Error('Invalid JSON response');
+       }
+   }
+
+   sanitizeMoveText(moveText) {
+       if (!moveText) return '';
+       let text = String(moveText).trim();
+       text = text.replace(/^\s*\d+\.{1,3}\s*/, '');
+       text = text.replace(/^\s*move\s*[:\-]\s*/i, '');
+       text = text.replace(/0-0-0/g, 'O-O-O').replace(/0-0/g, 'O-O');
+       return text.trim();
+   }
+
+   normalizeSanForCompare(moveText) {
+       return this.sanitizeMoveText(moveText)
+           .replace(/[+#!?]+/g, '')
+           .replace(/\s+/g, '');
+   }
+
+   isUciMove(moveText) {
+       return /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(moveText.toLowerCase());
+   }
+
+   resolveMove(moveText, legalMoves, legalMovesVerbose) {
+       const sanitized = this.sanitizeMoveText(moveText);
+       if (legalMoves.includes(sanitized)) return sanitized;
+
+       const normalized = this.normalizeSanForCompare(sanitized);
+       const normalizedMatches = legalMoves.filter(
+           (move) => this.normalizeSanForCompare(move) === normalized
+       );
+       if (normalizedMatches.length === 1) return normalizedMatches[0];
+       if (normalizedMatches.length > 1) return normalizedMatches[0];
+
+       if (this.isUciMove(sanitized) && Array.isArray(legalMovesVerbose)) {
+           const uci = sanitized.toLowerCase();
+           const from = uci.slice(0, 2);
+           const to = uci.slice(2, 4);
+           const promotion = uci.length > 4 ? uci.slice(4, 5) : null;
+           const match = legalMovesVerbose.find((move) => {
+               if (move.from !== from || move.to !== to) return false;
+               if (promotion && move.promotion) return move.promotion === promotion;
+               if (promotion && !move.promotion) return false;
+               return true;
+           });
+           if (match?.san) return match.san;
+       }
+
+       return null;
+   }
+
+   tryResolveMove(moveData, legalMoves, legalMovesVerbose) {
+       if (!moveData?.move) return null;
+       const resolved = this.resolveMove(moveData.move, legalMoves, legalMovesVerbose);
+       if (!resolved) return null;
+       return {
+           move: resolved,
+           reasoning: moveData.reasoning || ''
+       };
+   }
+
+   describeIllegalMove(moveText, legalMoves) {
+       if (!moveText) return 'Missing move field.';
+       const sanitized = this.sanitizeMoveText(moveText);
+       if (legalMoves.includes(sanitized)) return 'Move was legal but not accepted.';
+       return `Move \"${sanitized}\" is not legal for this position.`;
+   }
+
+   buildRethinkPrompt({ fen, history, lastError, lastMove }) {
+       const historyText = history || 'Opening position';
+       const feedback = lastError
+           ? `Previous move "${lastMove || 'N/A'}" was invalid. Reason: ${lastError}`
+           : '';
+
+       return `Current position (FEN): ${fen}
+Game history: ${historyText}
+${feedback}
+
+Choose a legal move in SAN based on the current position.
+Respond with a JSON containing your chosen move and reasoning.`;
    }
 
    async retryWithBackoff(fn, maxRetries = 3) {
@@ -71,33 +184,69 @@ class GroqProvider extends ChessModelProvider {
        this.temperature = temperature;
    }
 
-   async makeMove({ fen, history, legalMoves }) {
-       return this.retryWithBackoff(async () => {
-           const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-               method: 'POST',
-               headers: {
-                   'Authorization': `Bearer ${this.apiKey}`,
-                   'Content-Type': 'application/json'
-               },
-               body: JSON.stringify({
-                   messages: [
-                       { role: "system", content: SYSTEM_PROMPT },
-                       { role: "user", content: this.formatPrompt(fen, history, legalMoves) }
-                   ],
-                   model: this.model,
-                   temperature: parseFloat(this.temperature),
-                   max_tokens: 8024,
-                   response_format: { type: "json_object" }
-               })
-           });
+   async makeMove({ fen, history, legalMoves, legalMovesVerbose, strategy, maxRethinks }) {
+       const useRethink = strategy === MOVE_STRATEGIES.RETHINK;
+       const maxAttempts = useRethink ? Math.max(1, maxRethinks || 1) : 1;
+       let lastError = null;
+       let lastMove = null;
 
-           if (!response.ok) {
-               throw new Error(`Groq API Error: ${response.status} ${response.statusText}`);
+       const callModel = async (promptText, systemPrompt) => {
+           return this.retryWithBackoff(async () => {
+               const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                   method: 'POST',
+                   headers: {
+                       'Authorization': `Bearer ${this.apiKey}`,
+                       'Content-Type': 'application/json'
+                   },
+                   body: JSON.stringify({
+                       messages: [
+                           { role: "system", content: systemPrompt },
+                           { role: "user", content: promptText }
+                       ],
+                       model: this.model,
+                       temperature: parseFloat(this.temperature),
+                       max_tokens: 8024,
+                       response_format: { type: "json_object" }
+                   })
+               });
+
+               if (!response.ok) {
+                   throw new Error(`Groq API Error: ${response.status} ${response.statusText}`);
+               }
+
+               const data = await response.json();
+               return data.choices[0].message.content;
+           });
+       };
+
+       for (let attempt = 0; attempt < maxAttempts; attempt++) {
+           const promptText = useRethink
+               ? this.buildRethinkPrompt({ fen, history, lastError, lastMove })
+               : this.formatPrompt(fen, history, legalMoves);
+           const systemPrompt = useRethink ? SYSTEM_PROMPT_RETHINK : SYSTEM_PROMPT;
+
+           let moveData = null;
+           try {
+               const responseText = await callModel(promptText, systemPrompt);
+               moveData = this.parseMoveData(responseText);
+           } catch (error) {
+               if (!useRethink) throw error;
+               lastError = error.message;
+               continue;
            }
 
-           const data = await response.json();
-           return this.validateResponse(JSON.parse(data.choices[0].message.content), legalMoves);
-       });
+           if (!useRethink) {
+               return this.validateResponse(moveData, legalMoves);
+           }
+
+           const resolved = this.tryResolveMove(moveData, legalMoves, legalMovesVerbose);
+           if (resolved) return resolved;
+
+           lastMove = moveData?.move || null;
+           lastError = this.describeIllegalMove(moveData?.move, legalMoves);
+       }
+
+       throw new Error(`Invalid move after ${maxAttempts} attempts. Last issue: ${lastError || 'Unknown error'}`);
    }
 
    formatPrompt(fen, history, legalMoves) {
@@ -119,32 +268,110 @@ class OpenAIProvider extends ChessModelProvider {
        this.temperature = temperature;
    }
 
-   async makeMove({ fen, history, legalMoves }) {
-       return this.retryWithBackoff(async () => {
-           const response = await fetch('https://api.openai.com/v1/chat/completions', {
-               method: 'POST',
-               headers: {
-                   'Authorization': `Bearer ${this.apiKey}`,
-                   'Content-Type': 'application/json'
-               },
-               body: JSON.stringify({
+   async makeMove({ fen, history, legalMoves, legalMovesVerbose, strategy, maxRethinks }) {
+       const useRethink = strategy === MOVE_STRATEGIES.RETHINK;
+       const maxAttempts = useRethink ? Math.max(1, maxRethinks || 1) : 1;
+       let lastError = null;
+       let lastMove = null;
+
+       const callModel = async (promptText, systemPrompt) => {
+           const buildBody = (useResponseFormat) => {
+               const body = {
                    messages: [
-                       { role: "system", content: SYSTEM_PROMPT },
-                       { role: "user", content: this.formatPrompt(fen, history, legalMoves) }
+                       { role: "system", content: systemPrompt },
+                       { role: "user", content: promptText }
                    ],
                    model: this.model,
-                   temperature: parseFloat(this.temperature),
-                   response_format: { type: "json_object" }
-               })
-           });
+                   temperature: parseFloat(this.temperature)
+               };
+               if (useResponseFormat) {
+                   body.response_format = { type: "json_object" };
+               }
+               return body;
+           };
 
-           if (!response.ok) {
-               throw new Error(`OpenAI API Error: ${response.status} ${response.statusText}`);
+           const runRequest = async (useResponseFormat) => {
+               const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                   method: 'POST',
+                   headers: {
+                       'Authorization': `Bearer ${this.apiKey}`,
+                       'Content-Type': 'application/json'
+                   },
+                   body: JSON.stringify(buildBody(useResponseFormat))
+               });
+
+               if (response.ok) {
+                   const data = await response.json();
+                   return { ok: true, content: data.choices[0].message.content };
+               }
+
+               const errorText = await response.text();
+               let detail = errorText;
+               try {
+                   const errorJson = JSON.parse(errorText);
+                   detail = errorJson?.error?.message || errorText;
+               } catch (error) {
+                   detail = errorText;
+               }
+
+               return {
+                   ok: false,
+                   status: response.status,
+                   statusText: response.statusText,
+                   detail
+               };
+           };
+
+           return this.retryWithBackoff(async () => {
+               const firstAttempt = await runRequest(true);
+               if (firstAttempt.ok) return firstAttempt.content;
+
+               const shouldRetryWithoutFormat =
+                   firstAttempt.status === 400 &&
+                   /response_format|response format/i.test(firstAttempt.detail || '');
+
+               if (shouldRetryWithoutFormat) {
+                   const secondAttempt = await runRequest(false);
+                   if (secondAttempt.ok) return secondAttempt.content;
+                   throw new Error(
+                       `OpenAI API Error: ${secondAttempt.status} ${secondAttempt.statusText} ${secondAttempt.detail}`
+                   );
+               }
+
+               throw new Error(
+                   `OpenAI API Error: ${firstAttempt.status} ${firstAttempt.statusText} ${firstAttempt.detail}`
+               );
+           });
+       };
+
+       for (let attempt = 0; attempt < maxAttempts; attempt++) {
+           const promptText = useRethink
+               ? this.buildRethinkPrompt({ fen, history, lastError, lastMove })
+               : this.formatPrompt(fen, history, legalMoves);
+           const systemPrompt = useRethink ? SYSTEM_PROMPT_RETHINK : SYSTEM_PROMPT;
+
+           let moveData = null;
+           try {
+               const responseText = await callModel(promptText, systemPrompt);
+               moveData = this.parseMoveData(responseText);
+           } catch (error) {
+               if (!useRethink) throw error;
+               lastError = error.message;
+               continue;
            }
 
-           const data = await response.json();
-           return this.validateResponse(JSON.parse(data.choices[0].message.content), legalMoves);
-       });
+           if (!useRethink) {
+               return this.validateResponse(moveData, legalMoves);
+           }
+
+           const resolved = this.tryResolveMove(moveData, legalMoves, legalMovesVerbose);
+           if (resolved) return resolved;
+
+           lastMove = moveData?.move || null;
+           lastError = this.describeIllegalMove(moveData?.move, legalMoves);
+       }
+
+       throw new Error(`Invalid move after ${maxAttempts} attempts. Last issue: ${lastError || 'Unknown error'}`);
    }
 
    formatPrompt(fen, history, legalMoves) {
@@ -166,32 +393,68 @@ class GrokProvider extends ChessModelProvider {
        this.temperature = temperature;
    }
 
-   async makeMove({ fen, history, legalMoves }) {
-       return this.retryWithBackoff(async () => {
-           const response = await fetch('https://api.x.ai/v1/chat/completions', {
-               method: 'POST',
-               headers: {
-                   'Authorization': `Bearer ${this.apiKey}`,
-                   'Content-Type': 'application/json'
-               },
-               body: JSON.stringify({
-                   messages: [
-                       { role: "system", content: SYSTEM_PROMPT },
-                       { role: "user", content: this.formatPrompt(fen, history, legalMoves) }
-                   ],
-                   model: this.model,
-                   temperature: parseFloat(this.temperature),
-                   stream: false
-               })
-           });
+   async makeMove({ fen, history, legalMoves, legalMovesVerbose, strategy, maxRethinks }) {
+       const useRethink = strategy === MOVE_STRATEGIES.RETHINK;
+       const maxAttempts = useRethink ? Math.max(1, maxRethinks || 1) : 1;
+       let lastError = null;
+       let lastMove = null;
 
-           if (!response.ok) {
-               throw new Error(`Grok API Error: ${response.status} ${response.statusText}`);
+       const callModel = async (promptText, systemPrompt) => {
+           return this.retryWithBackoff(async () => {
+               const response = await fetch('https://api.x.ai/v1/chat/completions', {
+                   method: 'POST',
+                   headers: {
+                       'Authorization': `Bearer ${this.apiKey}`,
+                       'Content-Type': 'application/json'
+                   },
+                   body: JSON.stringify({
+                       messages: [
+                           { role: "system", content: systemPrompt },
+                           { role: "user", content: promptText }
+                       ],
+                       model: this.model,
+                       temperature: parseFloat(this.temperature),
+                       stream: false
+                   })
+               });
+
+               if (!response.ok) {
+                   throw new Error(`Grok API Error: ${response.status} ${response.statusText}`);
+               }
+
+               const data = await response.json();
+               return data.choices[0].message.content;
+           });
+       };
+
+       for (let attempt = 0; attempt < maxAttempts; attempt++) {
+           const promptText = useRethink
+               ? this.buildRethinkPrompt({ fen, history, lastError, lastMove })
+               : this.formatPrompt(fen, history, legalMoves);
+           const systemPrompt = useRethink ? SYSTEM_PROMPT_RETHINK : SYSTEM_PROMPT;
+
+           let moveData = null;
+           try {
+               const responseText = await callModel(promptText, systemPrompt);
+               moveData = this.parseMoveData(responseText);
+           } catch (error) {
+               if (!useRethink) throw error;
+               lastError = error.message;
+               continue;
            }
 
-           const data = await response.json();
-           return this.validateResponse(JSON.parse(data.choices[0].message.content), legalMoves);
-       });
+           if (!useRethink) {
+               return this.validateResponse(moveData, legalMoves);
+           }
+
+           const resolved = this.tryResolveMove(moveData, legalMoves, legalMovesVerbose);
+           if (resolved) return resolved;
+
+           lastMove = moveData?.move || null;
+           lastError = this.describeIllegalMove(moveData?.move, legalMoves);
+       }
+
+       throw new Error(`Invalid move after ${maxAttempts} attempts. Last issue: ${lastError || 'Unknown error'}`);
    }
 
    formatPrompt(fen, history, legalMoves) {
@@ -213,50 +476,91 @@ class GeminiProvider extends ChessModelProvider {
         this.temperature = temperature;
     }
 
-    async makeMove({ fen, history, legalMoves }) {
-        return this.retryWithBackoff(async () => {
-            const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-goog-api-key': this.apiKey
-                },
-                body: JSON.stringify({
-                    contents: [
-                        {
-                            role: 'user',
-                            parts: [{ text: SYSTEM_PROMPT }]
-                        },
-                        {
-                            role: 'user',
-                            parts: [{ text: this.formatPrompt(fen, history, legalMoves) }]
+    async makeMove({ fen, history, legalMoves, legalMovesVerbose, strategy, maxRethinks }) {
+        const useRethink = strategy === MOVE_STRATEGIES.RETHINK;
+        const maxAttempts = useRethink ? Math.max(1, maxRethinks || 1) : 1;
+        let lastError = null;
+        let lastMove = null;
+
+        const callModel = async (promptText, systemPrompt) => {
+            return this.retryWithBackoff(async () => {
+                const modelPath = encodeURIComponent(this.model);
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelPath}:generateContent`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-goog-api-key': this.apiKey
+                    },
+                    body: JSON.stringify({
+                        contents: [
+                            {
+                                role: 'user',
+                                parts: [{ text: systemPrompt }]
+                            },
+                            {
+                                role: 'user',
+                                parts: [{ text: promptText }]
+                            }
+                        ],
+                        generationConfig: {
+                            temperature: parseFloat(this.temperature),
+                            topP: 0.95,
+                            topK: 40,
+                            maxOutputTokens: 8192,
+                            stopSequences: []
                         }
-                    ],
-                    generationConfig: {
-                        temperature: parseFloat(this.temperature),
-                        topP: 0.95,
-                        topK: 40,
-                        maxOutputTokens: 8192,
-                        stopSequences: []
+                    })
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    let detail = errorText;
+                    try {
+                        const errorJson = JSON.parse(errorText);
+                        detail = errorJson?.error?.message || errorText;
+                    } catch (error) {
+                        detail = errorText;
                     }
-                })
+                    throw new Error(`Gemini API Error: ${response.status} ${response.statusText} ${detail}`);
+                }
+
+                const data = await response.json();
+                if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
+                    throw new Error('Invalid response format from Gemini API');
+                }
+
+                return data.candidates[0].content.parts[0].text;
             });
+        };
 
-            if (!response.ok) {
-                throw new Error(`Gemini API Error: ${response.status} ${response.statusText}`);
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const promptText = useRethink
+                ? this.buildRethinkPrompt({ fen, history, lastError, lastMove })
+                : this.formatPrompt(fen, history, legalMoves);
+            const systemPrompt = useRethink ? SYSTEM_PROMPT_RETHINK : SYSTEM_PROMPT;
+
+            let moveData = null;
+            try {
+                const responseText = await callModel(promptText, systemPrompt);
+                moveData = this.parseMoveData(responseText);
+            } catch (error) {
+                if (!useRethink) throw error;
+                lastError = error.message;
+                continue;
             }
 
-            const data = await response.json();
-            if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
-                throw new Error('Invalid response format from Gemini API');
+            if (!useRethink) {
+                return this.validateResponse(moveData, legalMoves);
             }
 
-            let responseText = data.candidates[0].content.parts[0].text;
-            responseText = responseText.replace(/```json\s*|\s*```/g, '').trim();
-            const moveData = JSON.parse(responseText);
+            const resolved = this.tryResolveMove(moveData, legalMoves, legalMovesVerbose);
+            if (resolved) return resolved;
 
-            return this.validateResponse(moveData, legalMoves);
-        });
+            lastMove = moveData?.move || null;
+            lastError = this.describeIllegalMove(moveData?.move, legalMoves);
+        }
+
+        throw new Error(`Invalid move after ${maxAttempts} attempts. Last issue: ${lastError || 'Unknown error'}`);
     }
 
     formatPrompt(fen, history, legalMoves) {
@@ -278,41 +582,81 @@ class OpenRouterProvider extends ChessModelProvider {
         this.temperature = temperature;
     }
 
-    async makeMove({ fen, history, legalMoves }) {
-        return this.retryWithBackoff(async () => {
-            const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${this.apiKey}`,
-                    'Content-Type': 'application/json',
-                    'HTTP-Referer': window.location.origin // OpenRouter requires this
-                },
-                body: JSON.stringify({
-                    messages: [
-                        { role: "system", content: SYSTEM_PROMPT },
-                        { role: "user", content: this.formatPrompt(fen, history, legalMoves) }
-                    ],
-                    model: this.model,
-                    temperature: parseFloat(this.temperature),
-                    response_format: { type: "json_object" }
-                })
-            });
+    async makeMove({ fen, history, legalMoves, legalMovesVerbose, strategy, maxRethinks }) {
+        const useRethink = strategy === MOVE_STRATEGIES.RETHINK;
+        const maxAttempts = useRethink ? Math.max(1, maxRethinks || 1) : 1;
+        let lastError = null;
+        let lastMove = null;
 
-            if (!response.ok) {
-                throw new Error(`OpenRouter API Error: ${response.status} ${response.statusText}`);
+        const callModel = async (promptText, systemPrompt) => {
+            return this.retryWithBackoff(async () => {
+                const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${this.apiKey}`,
+                        'Content-Type': 'application/json',
+                        'HTTP-Referer': window.location.origin // OpenRouter requires this
+                    },
+                    body: JSON.stringify({
+                        messages: [
+                            { role: "system", content: systemPrompt },
+                            { role: "user", content: promptText }
+                        ],
+                        model: this.model,
+                        temperature: parseFloat(this.temperature),
+                        response_format: { type: "json_object" }
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`OpenRouter API Error: ${response.status} ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                return data.choices[0].message.content;
+            });
+        };
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const promptText = useRethink
+                ? this.buildRethinkPrompt({ fen, history, lastError, lastMove })
+                : this.formatPrompt(fen, history, legalMoves);
+            const systemPrompt = useRethink ? SYSTEM_PROMPT_RETHINK : SYSTEM_PROMPT;
+
+            let moveData = null;
+            try {
+                const responseText = await callModel(promptText, systemPrompt);
+                moveData = this.parseMoveData(responseText);
+            } catch (error) {
+                if (!useRethink) throw error;
+                lastError = error.message;
+                continue;
             }
 
-            const data = await response.json();
-            return this.validateResponse(JSON.parse(data.choices[0].message.content), legalMoves);
-        });
+            if (!useRethink) {
+                return this.validateResponse(moveData, legalMoves);
+            }
+
+            const resolved = this.tryResolveMove(moveData, legalMoves, legalMovesVerbose);
+            if (resolved) return resolved;
+
+            lastMove = moveData?.move || null;
+            lastError = this.describeIllegalMove(moveData?.move, legalMoves);
+        }
+
+        throw new Error(`Invalid move after ${maxAttempts} attempts. Last issue: ${lastError || 'Unknown error'}`);
     }
 
     formatPrompt(fen, history, legalMoves) {
+        const historyText = Array.isArray(history)
+            ? history.map(move => `${move.moveNumber}. ${move.san}`).join('\n')
+            : (history || 'Opening position');
+
         return `
 Current board position (FEN): ${fen}
 
 Game history:
-${history.map(move => `${move.moveNumber}. ${move.san}`).join('\n')}
+${historyText}
 
 Legal moves: ${legalMoves.join(', ')}
 
@@ -418,6 +762,7 @@ class ChessGame {
        this.debugMode = false;
        this.selectedPiece = null;
        this.legalMoves = new Map();
+       this.moveStrategy = MOVE_STRATEGIES.STRICT_LIST;
 
        this.initialize();
        this.updatePlayerControls();
@@ -751,6 +1096,14 @@ class ChessGame {
             this.debugMode = checked;
             this.logDebug('Debug mode ' + (this.debugMode ? 'enabled' : 'disabled'));
         });
+
+        const strategyInputs = document.querySelectorAll('input[name="moveStrategy"]');
+        strategyInputs.forEach((input) => {
+            input.addEventListener('change', (event) => {
+                this.moveStrategy = event.target.value;
+                this.saveSettings();
+            });
+        });
         
         // Temperature sliders
         ['temp1', 'temp2'].forEach(id => {
@@ -820,6 +1173,12 @@ class ChessGame {
            }
        });
 
+       if (settings.moveStrategy) {
+           this.moveStrategy = settings.moveStrategy;
+           const selected = document.querySelector(`input[name="moveStrategy"][value="${settings.moveStrategy}"]`);
+           if (selected) selected.checked = true;
+       }
+
        // Update temperature ranges for saved models
        ['1', '2'].forEach(playerNum => {
            const providerId = document.getElementById(`provider${playerNum}`).value;
@@ -854,7 +1213,8 @@ class ChessGame {
            playerType2: document.getElementById('playerType2').value,
            provider2: document.getElementById('provider2').value,
            model2: document.getElementById('model2').value,
-           temp2: document.getElementById('temp2').value
+           temp2: document.getElementById('temp2').value,
+           moveStrategy: this.moveStrategy
        };
        localStorage.setItem('chessSettings', JSON.stringify(settings));
        this.updatePlayerControls();
@@ -898,6 +1258,7 @@ class ChessGame {
            const modelId = document.getElementById(`model${player}`).value;
            const apiKey = document.getElementById(`apiKey${player}`).value;
            const temperature = document.getElementById(`temp${player}`).value;
+           const maxRethinks = parseInt(document.getElementById('maxRetries').value, 10) || 1;
 
            if (!apiKey) {
                throw new Error(`API key required for ${this.currentPlayer} player`);
@@ -907,7 +1268,10 @@ class ChessGame {
            const moveData = await provider.makeMove({
                fen: this.game.fen(),
                history: this.game.history().join(' '),
-               legalMoves: this.game.moves()
+               legalMoves: this.game.moves(),
+               legalMovesVerbose: this.game.moves({ verbose: true }),
+               strategy: this.moveStrategy,
+               maxRethinks
            });
 
            const move = this.game.move(moveData.move);
