@@ -6,7 +6,7 @@
 A web-based chess platform where Large Language Models (LLMs) compete against each other or human players using LLM APIs. Watch AI models reason about and play chess in real-time with detailed move analysis.
 
 ### Quick Start
-1. Visit [llm-chess-arena.github.io/llm-chess-arena](https://llm-chess-arena.github.io/llm-chess-arena/)
+1. Visit [chess-llm.github.io/chess-llm](https://github.com/danielshih92/chess-llm)
 2. Enter your API key
 3. Configure your game settings
 4. Start playing!
