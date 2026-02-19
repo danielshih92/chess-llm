@@ -62,6 +62,8 @@ const MOVE_STRATEGIES = {
     RETHINK: 'rethink'
 };
 
+const DEFAULT_TEMPERATURE = '0.8';
+
 class ChessModelProvider {
    async makeMove({ fen, history, legalMoves }) {
        throw new Error('Method must be implemented');
@@ -1110,15 +1112,7 @@ class ChessGame {
             });
         });
         
-        // Temperature sliders
-        ['temp1', 'temp2'].forEach(id => {
-            const slider = document.getElementById(id);
-            if (slider) {
-                slider.addEventListener('input', (e) => {
-                    document.getElementById(id + 'Value').textContent = e.target.value;
-                });
-            }
-        });
+        // Temperature sliders are intentionally disabled in the UI.
         
         // API key handling
         ['1', '2'].forEach(playerNum => {
@@ -1214,11 +1208,11 @@ class ChessGame {
            playerType1: document.getElementById('playerType1').value,
            provider1: document.getElementById('provider1').value,
            model1: document.getElementById('model1').value,
-           temp1: document.getElementById('temp1').value,
+           temp1: DEFAULT_TEMPERATURE,
            playerType2: document.getElementById('playerType2').value,
            provider2: document.getElementById('provider2').value,
            model2: document.getElementById('model2').value,
-           temp2: document.getElementById('temp2').value,
+           temp2: DEFAULT_TEMPERATURE,
            moveStrategy: this.moveStrategy
        };
        localStorage.setItem('chessSettings', JSON.stringify(settings));
@@ -1270,11 +1264,11 @@ class ChessGame {
            const providerId = this.getElementValue(`provider${player}`);
            const modelId = this.getElementValue(`model${player}`);
            const apiKey = this.getElementValue(`apiKey${player}`);
-           const temperature = this.getElementValue(`temp${player}`, '0.7');
+           const temperature = DEFAULT_TEMPERATURE;
            const maxRetriesInput = document.getElementById('maxRetries');
            const maxRethinks = maxRetriesInput
-               ? parseInt(maxRetriesInput.value, 10) || 3
-               : 3;
+               ? parseInt(maxRetriesInput.value, 10) || 5
+               : 5;
 
            if (!apiKey) {
                throw new Error(`API key required for ${this.currentPlayer} player`);
