@@ -795,6 +795,11 @@ class ChessGame {
        this.board = Chessboard('board', config);
    }
 
+   getElementValue(id, fallback = '') {
+       const element = document.getElementById(id);
+       return element ? element.value : fallback;
+   }
+
    updateApiKeyButtons(playerNum) {
        const apiKeyInput = document.getElementById(`apiKey${playerNum}`);
        const providerSelect = document.getElementById(`provider${playerNum}`);
@@ -843,9 +848,9 @@ class ChessGame {
    }
 
    onDragStart(source, piece) {
-       const playerType = this.currentPlayer === 'white' ? 
-           document.getElementById('playerType1').value :
-           document.getElementById('playerType2').value;
+       const playerType = this.currentPlayer === 'white'
+           ? this.getElementValue('playerType1', 'human')
+           : this.getElementValue('playerType2', 'human');
 
        if (playerType !== 'human') return false;
        if (this.game.game_over()) return false;
@@ -857,9 +862,9 @@ class ChessGame {
    }
 
    onMouseoverSquare(square) {
-       const playerType = this.currentPlayer === 'white' ? 
-           document.getElementById('playerType1').value :
-           document.getElementById('playerType2').value;
+       const playerType = this.currentPlayer === 'white'
+           ? this.getElementValue('playerType1', 'human')
+           : this.getElementValue('playerType2', 'human');
 
        if (playerType !== 'human') return;
 
@@ -888,9 +893,9 @@ class ChessGame {
    }
 
    onDrop(source, target) {
-       const playerType = this.currentPlayer === 'white' ? 
-           document.getElementById('playerType1').value :
-           document.getElementById('playerType2').value;
+       const playerType = this.currentPlayer === 'white'
+           ? this.getElementValue('playerType1', 'human')
+           : this.getElementValue('playerType2', 'human');
 
        if (playerType !== 'human') return 'snapback';
 
@@ -916,9 +921,9 @@ class ChessGame {
            return;
        }
 
-       const nextPlayerType = this.currentPlayer === 'white' ? 
-           document.getElementById('playerType1').value :
-           document.getElementById('playerType2').value;
+       const nextPlayerType = this.currentPlayer === 'white'
+           ? this.getElementValue('playerType1', 'human')
+           : this.getElementValue('playerType2', 'human');
 
        if (nextPlayerType === 'ai') {
            setTimeout(() => this.makeMove(), 500);
@@ -1222,20 +1227,28 @@ class ChessGame {
 
    updatePlayerControls() {
        ['1', '2'].forEach(player => {
-           const playerType = document.getElementById(`playerType${player}`).value;
+           const playerType = this.getElementValue(`playerType${player}`, 'human');
            const aiSettings = document.getElementById(`aiSettings${player}`);
-           aiSettings.style.display = playerType === 'ai' ? 'block' : 'none';
+           if (aiSettings) {
+               aiSettings.style.display = playerType === 'ai' ? 'block' : 'none';
+           }
             
            // If playerType is 'ai', show model group only if provider is selected
            if (playerType === 'ai') {
-               const providerId = document.getElementById(`provider${player}`).value;
-               document.getElementById(`modelGroup${player}`).style.display = providerId ? 'block' : 'none';
-               document.getElementById(`apiKeyGroup${player}`).style.display = providerId ? 'block' : 'none';
+               const providerId = this.getElementValue(`provider${player}`);
+               const modelGroup = document.getElementById(`modelGroup${player}`);
+               const apiKeyGroup = document.getElementById(`apiKeyGroup${player}`);
+               if (modelGroup) {
+                   modelGroup.style.display = providerId ? 'block' : 'none';
+               }
+               if (apiKeyGroup) {
+                   apiKeyGroup.style.display = providerId ? 'block' : 'none';
+               }
            }
        });
 
        const currentPlayerNum = this.currentPlayer === 'white' ? '1' : '2';
-       const currentPlayerType = document.getElementById(`playerType${currentPlayerNum}`).value;
+       const currentPlayerType = this.getElementValue(`playerType${currentPlayerNum}`, 'human');
        document.getElementById('stepBtn').disabled = currentPlayerType !== 'ai' || this.game.game_over();
    }
 
@@ -1246,7 +1259,7 @@ class ChessGame {
 
        try {
            const player = this.currentPlayer === 'white' ? 1 : 2;
-           const playerType = document.getElementById(`playerType${player}`).value;
+           const playerType = this.getElementValue(`playerType${player}`, 'human');
 
            if (playerType === 'human') {
                this.isProcessingMove = false;
@@ -1254,11 +1267,14 @@ class ChessGame {
                return false;
            }
 
-           const providerId = document.getElementById(`provider${player}`).value;
-           const modelId = document.getElementById(`model${player}`).value;
-           const apiKey = document.getElementById(`apiKey${player}`).value;
-           const temperature = document.getElementById(`temp${player}`).value;
-           const maxRethinks = parseInt(document.getElementById('maxRetries').value, 10) || 1;
+           const providerId = this.getElementValue(`provider${player}`);
+           const modelId = this.getElementValue(`model${player}`);
+           const apiKey = this.getElementValue(`apiKey${player}`);
+           const temperature = this.getElementValue(`temp${player}`, '0.7');
+           const maxRetriesInput = document.getElementById('maxRetries');
+           const maxRethinks = maxRetriesInput
+               ? parseInt(maxRetriesInput.value, 10) || 3
+               : 3;
 
            if (!apiKey) {
                throw new Error(`API key required for ${this.currentPlayer} player`);
@@ -1289,11 +1305,12 @@ class ChessGame {
                return false;
            }
 
-           const nextPlayerType = this.currentPlayer === 'white' ? 
-               document.getElementById('playerType1').value :
-               document.getElementById('playerType2').value;
+           const nextPlayerType = this.currentPlayer === 'white'
+               ? this.getElementValue('playerType1', 'human')
+               : this.getElementValue('playerType2', 'human');
 
-           if (nextPlayerType === 'ai' && document.getElementById('autoPlay').checked) {
+           const autoPlayToggle = document.getElementById('autoPlay');
+           if (nextPlayerType === 'ai' && autoPlayToggle && autoPlayToggle.checked) {
                return true;
            }
 
@@ -1309,12 +1326,14 @@ class ChessGame {
    }
 
    toggleAutoPlay(enabled) {
-       if (enabled && !this.game.game_over()) {
-           const delay = parseInt(document.getElementById('moveDelay').value);
+       const autoPlayToggle = document.getElementById('autoPlay');
+       const delayInput = document.getElementById('moveDelay');
+       if (enabled && !this.game.game_over() && autoPlayToggle) {
+           const delay = delayInput ? parseInt(delayInput.value, 10) : 2000;
            this.autoPlayInterval = setInterval(async () => {
-               if (this.game.game_over() || !document.getElementById('autoPlay').checked) {
+               if (this.game.game_over() || !autoPlayToggle.checked) {
                    this.toggleAutoPlay(false);
-                   document.getElementById('autoPlay').checked = false;
+                   autoPlayToggle.checked = false;
                    return;
                }
                
@@ -1326,7 +1345,7 @@ class ChessGame {
                    const shouldContinue = await this.makeMove();
                    if (!shouldContinue) {
                        this.toggleAutoPlay(false);
-                       document.getElementById('autoPlay').checked = false;
+                       autoPlayToggle.checked = false;
                    }
                }
            }, delay);
@@ -1346,13 +1365,16 @@ class ChessGame {
        this.moveCount = 1;
        document.getElementById('reasoningLog').innerHTML = '';
        document.getElementById('stepBtn').disabled = false;
-       document.getElementById('autoPlay').checked = false;
+       const autoPlayToggle = document.getElementById('autoPlay');
+       if (autoPlayToggle) {
+           autoPlayToggle.checked = false;
+       }
        this.isProcessingMove = false;
        this.logDebug('Starting new game');
        this.updateStatus();
        this.updatePlayerControls();
 
-       const whitePlayerType = document.getElementById('playerType1').value;
+    const whitePlayerType = this.getElementValue('playerType1', 'human');
        if (whitePlayerType === 'ai') {
            setTimeout(() => this.makeMove(), 500);
        }
@@ -1360,7 +1382,10 @@ class ChessGame {
 
    handleGameOver() {
        this.toggleAutoPlay(false);
-       document.getElementById('autoPlay').checked = false;
+       const autoPlayToggle = document.getElementById('autoPlay');
+       if (autoPlayToggle) {
+           autoPlayToggle.checked = false;
+       }
        document.getElementById('stepBtn').disabled = true;
        let result = '';
        if (this.game.in_checkmate()) {
@@ -1395,10 +1420,10 @@ class ChessGame {
        entry.className = `move-entry ${this.currentPlayer}`;
        
        const playerNum = this.currentPlayer === 'white' ? '1' : '2';
-       const playerType = document.getElementById(`playerType${playerNum}`).value;
-       const providerId = document.getElementById(`provider${playerNum}`).value;
+       const playerType = this.getElementValue(`playerType${playerNum}`, 'human');
+       const providerId = this.getElementValue(`provider${playerNum}`);
        const modelName = playerType === 'ai' ? 
-           ` (${document.getElementById(`model${playerNum}`).value})` : 
+           ` (${this.getElementValue(`model${playerNum}`)})` : 
            ' (Human)';
 
        entry.innerHTML = `

@@ -36,8 +36,12 @@ const PROVIDER_CONFIG = {
                 displayName: 'GPT-5.2',
                 tempRange: { min: 0.1, max: 1.0 }
             },
-            'gpt-4': {
-                displayName: 'GPT-4',
+            'o3': {
+                displayName: 'o3',
+                tempRange: { min: 0.1, max: 1.0 }
+            },
+            'o3-mini': {
+                displayName: 'o3-mini',
                 tempRange: { min: 0.1, max: 1.0 }
             },
             'gpt-4-turbo': {
@@ -48,10 +52,7 @@ const PROVIDER_CONFIG = {
                 displayName: 'GPT-4o',
                 tempRange: { min: 0.1, max: 1.0 }
             },
-            'gpt-3.5-turbo': {
-                displayName: 'GPT-3.5 Turbo',
-                tempRange: { min: 0.1, max: 1.0 }
-            }
+            
         }
     },
     'gemini': {
@@ -154,3 +155,9 @@ if (typeof window !== 'undefined') {
 }
 
 // execution: python3 -m http.server 8000
+/**
+git status -> nothing to commit, working tree clean
+git checkout -b v2
+git branch
+git push -u origin v2
+*/
